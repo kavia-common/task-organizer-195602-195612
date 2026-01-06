@@ -1,7 +1,10 @@
 import os
+import time
+from typing import Callable
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from src.api.db import get_engine
 from src.api.models import Base
@@ -25,20 +28,59 @@ app = FastAPI(
     openapi_tags=openapi_tags,
 )
 
+# CORS configuration
+# - Default to allowing local dev + this platform's preview host.
+# - IMPORTANT: If allow_credentials=True, allow_origins cannot be ["*"] (browser will reject).
+default_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    # The preview URL host for this environment (frontend runs on :3000).
+    "https://vscode-internal-10540-qa.qa01.cloud.kavia.ai:3000",
+]
 allow_origins_env = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
 allow_origins = (
     [o.strip() for o in allow_origins_env.split(",") if o.strip()]
     if allow_origins_env
-    else ["*"]
+    else default_origins
 )
+
+# If user explicitly configured wildcard, disable credentials to remain spec-compliant.
+allow_credentials = True
+if len(allow_origins) == 1 and allow_origins[0] == "*":
+    allow_credentials = False
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allow_origins,
-    allow_credentials=True,
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Minimal request logging + timing (helps diagnose "Failed to fetch" and 5xx issues)
+@app.middleware("http")
+async def _log_requests(request: Request, call_next: Callable):
+    start = time.time()
+    try:
+        response = await call_next(request)
+    except Exception as exc:  # pragma: no cover
+        duration_ms = int((time.time() - start) * 1000)
+        print(
+            f"[error] {request.method} {request.url.path} -> 500 in {duration_ms}ms: {exc}"
+        )
+        # Ensure errors are returned as JSON (frontend expects JSON) and are debuggable.
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": "Internal Server Error",
+                # Keep message high-level; avoid leaking secrets.
+                "hint": "Check backend logs for details. If DB is down/misconfigured, set POSTGRES_URL/DATABASE_URL.",
+            },
+        )
+
+    duration_ms = int((time.time() - start) * 1000)
+    print(f"[request] {request.method} {request.url.path} -> {response.status_code} in {duration_ms}ms")
+    return response
 
 
 @app.on_event("startup")
