@@ -43,13 +43,22 @@ app.add_middleware(
 
 @app.on_event("startup")
 def _startup():
-    """Initialize DB schema on startup.
+    """Initialize DB schema on startup (best-effort).
 
-    For this simple demo app we create tables automatically.
+    For this simple demo app we attempt to create tables automatically.
     In production, use migrations (Alembic).
+
+    Important: the application should still start even if the database is unavailable
+    (e.g., missing env vars, DB container not ready). DB-backed endpoints will fail when used,
+    but the process stays up (health checks, docs, etc).
     """
-    engine = get_engine()
-    Base.metadata.create_all(bind=engine)
+    try:
+        engine = get_engine()
+        Base.metadata.create_all(bind=engine)
+    except Exception as exc:  # pragma: no cover
+        # Best-effort startup: log and continue so the server can run.
+        # Uvicorn/Starlette will capture stdout/stderr.
+        print(f"[startup] Database initialization skipped: {exc}")
 
 
 @app.get(
